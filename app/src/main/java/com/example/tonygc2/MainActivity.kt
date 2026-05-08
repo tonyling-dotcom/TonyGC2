@@ -61,11 +61,28 @@ class MainActivity : ComponentActivity() {
                 ) {
                     val connectionState by bluetoothManager.connectionState.collectAsState()
                     val shotData by bluetoothManager.latestShotData.collectAsState()
+                    val rawData by bluetoothManager.rawBluetoothData.collectAsState()
                     val availableDevices by bluetoothManager.availableDevices.collectAsState()
                     var expanded by remember { mutableStateOf(false) }
 
                     Box(modifier = Modifier.fillMaxSize()) {
+                        // Only show the ShotDisplayScreen if we have valid shot data, 
+                        // otherwise show the default "--" state
                         ShotDisplayScreen(shotData)
+                        
+                        // Raw data debug view at the bottom
+                        if (rawData.isNotEmpty()) {
+                            Text(
+                                text = "Raw: $rawData",
+                                color = Color.Gray,
+                                fontSize = 10.sp,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier
+                                    .align(Alignment.BottomCenter)
+                                    .padding(8.dp)
+                                    .fillMaxWidth()
+                            )
+                        }
                         
                         // Small connection status indicator and dropdown at the top right
                         Column(
@@ -186,7 +203,7 @@ fun ShotDisplayScreen(shotData: ShotData?) {
         MetricBox(
             modifier = Modifier.weight(1f),
             label = "CARRY",
-            value = shotData?.carryDistance?.toString() ?: "--",
+            value = shotData?.carryDistance?.let { String.format(java.util.Locale.US, "%.1f", it) } ?: "--",
             unit = "YARDS"
         )
 
@@ -194,7 +211,7 @@ fun ShotDisplayScreen(shotData: ShotData?) {
         MetricBox(
             modifier = Modifier.weight(1f),
             label = "TOTAL",
-            value = shotData?.totalDistance?.toString() ?: "--",
+            value = shotData?.totalDistance?.let { String.format(java.util.Locale.US, "%.1f", it) } ?: "--",
             unit = "YARDS"
         )
 

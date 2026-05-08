@@ -44,6 +44,9 @@ class Gc2BluetoothManager(private val context: Context) {
     private val _latestShotData = MutableStateFlow<ShotData?>(null)
     val latestShotData: StateFlow<ShotData?> = _latestShotData.asStateFlow()
 
+    private val _rawBluetoothData = MutableStateFlow<String>("")
+    val rawBluetoothData: StateFlow<String> = _rawBluetoothData.asStateFlow()
+
     private val _availableDevices = MutableStateFlow<List<BluetoothDevice>>(emptyList())
     val availableDevices: StateFlow<List<BluetoothDevice>> = _availableDevices.asStateFlow()
 
@@ -153,6 +156,8 @@ class Gc2BluetoothManager(private val context: Context) {
                     val device = bluetoothAdapter?.getRemoteDevice(savedAddress)
                     if (device != null) {
                         _connectionState.value = ConnectionState.Connecting
+                        // Ensure discovery is cancelled before attempting to connect
+                        bluetoothAdapter?.cancelDiscovery()
                         connectToDevice(device)
                     } else {
                         _connectionState.value = ConnectionState.Error("Saved device not found")
@@ -160,15 +165,13 @@ class Gc2BluetoothManager(private val context: Context) {
                     }
                 } catch (e: Exception) {
                     Log.e("Gc2Bluetooth", "Connection error", e)
-                    _connectionState.value = ConnectionState.Error(e.message ?: "Unknown error")
-                    
-                    // If connection fails, start discovery to see if it comes in range
-                    _connectionState.value = ConnectionState.Scanning
-                    if (bluetoothAdapter?.isDiscovering == false) {
-                        bluetoothAdapter?.startDiscovery()
-                    }
-                    delay(10000) // Reconnect delay
+                    _connectionState.value = ConnectionState.Disconnected
+                    // Wait before retrying to avoid spamming connection attempts
+                    delay(5000) 
                 }
+                
+                // If connectToDevice returns normally (e.g., disconnected gracefully), wait a bit before retrying
+                delay(3000)
             }
         }
     }
@@ -226,16 +229,21 @@ class Gc2BluetoothManager(private val context: Context) {
                         val incomingMessage = String(buffer, 0, bytes)
                         stringBuilder.append(incomingMessage)
 
-                        // Assuming NMEA strings end with \n or \r\n
-                        var endOfLineIndex = stringBuilder.indexOf("\n")
-                        while (endOfLineIndex > 0) {
+                        // Handle different line endings (\r\n, \n, \r)
+                        var endOfLineIndex = stringBuilder.indexOfAny(charArrayOf('\n', '\r'))
+                        while (endOfLineIndex >= 0) {
                             val completeString = stringBuilder.substring(0, endOfLineIndex).trim()
+                            
                             stringBuilder.delete(0, endOfLineIndex + 1)
+                            // Remove any trailing \n or \r (e.g. if it was \r\n)
+                            while(stringBuilder.isNotEmpty() && (stringBuilder[0] == '\n' || stringBuilder[0] == '\r')) {
+                                stringBuilder.deleteCharAt(0)
+                            }
                             
                             if (completeString.isNotEmpty()) {
                                 handleIncomingData(completeString)
                             }
-                            endOfLineIndex = stringBuilder.indexOf("\n")
+                            endOfLineIndex = stringBuilder.indexOfAny(charArrayOf('\n', '\r'))
                         }
                     }
                 } catch (e: Exception) {
@@ -251,6 +259,7 @@ class Gc2BluetoothManager(private val context: Context) {
 
     private fun handleIncomingData(data: String) {
         Log.d("Gc2Bluetooth", "Received: $data")
+        _rawBluetoothData.value = data
         val parsedData = Gc2DataParser.parse(data)
         if (parsedData != null) {
             _latestShotData.value = parsedData

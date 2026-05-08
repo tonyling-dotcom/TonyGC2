@@ -19,30 +19,94 @@ object Gc2DataParser {
      */
     fun parse(nmeaString: String): ShotData? {
         try {
-            // Basic NMEA validation (starts with $ or similar, ends with checksum *XX)
-            // Example GC2 string: $FSSHT,CarryDist,TotalDist,TotalSide,...*XX
-            val cleanString = nmeaString.trim().trimStart('$').substringBefore('*')
-            val parts = cleanString.split(",")
+            // Check if it's the standard GC2 data format: CT=...,SN=...,...,CY=...,TL=...
+            if (nmeaString.contains("CY=") && nmeaString.contains("TL=")) {
+                val parts = nmeaString.split(",")
+                
+                var carryYards = 0.0
+                var totalYards = 0.0
+                var offlineYards = 0.0
+                var azimuth = 0.0
+                var ballSpeed = 0.0
+                var totalSpin = 0.0
+                var elevation = 0.0
+                var sideSpin = 0.0
+                var backSpin = 0.0
+                
+                for (part in parts) {
+                    val keyValue = part.split("=")
+                    if (keyValue.size == 2) {
+                        val key = keyValue[0].trim()
+                        val value = keyValue[1].trim().toDoubleOrNull() ?: 0.0
+                        
+                        when (key) {
+                            "CY" -> carryYards = value // Carry distance
+                            "TL" -> totalYards = value // Total distance
+                            "AZ" -> azimuth = value    // Azimuth (Launch direction L/R)
+                            "SP" -> ballSpeed = value  // Ball Speed
+                            "TS" -> totalSpin = value  // Total Spin
+                            "EL" -> elevation = value  // Elevation / Launch Angle
+                            "SS" -> sideSpin = value   // Side Spin
+                            "BS" -> backSpin = value   // Back Spin
+                        }
+                    }
+                }
 
-            // TODO: Update these indices based on the exact GC2 NMEA protocol documentation.
-            // For now, we assume a placeholder structure or search for keywords if it's JSON.
-            // If it's a standard NMEA string, we need the exact indices.
-            // Let's assume indices 1, 2, 3 for Carry, Total, Offline for demonstration.
-            if (parts.size >= 4) {
-                // Assuming distances are in yards or need conversion. The PRD says "normalized to Yards".
-                // If the GC2 outputs meters, we would multiply by 1.09361.
-                // We'll assume the GC2 outputs yards by default, or we can add a conversion factor.
-                val carryYards = parts[1].toDoubleOrNull()?.roundToInt() ?: 0
-                val totalYards = parts[2].toDoubleOrNull()?.roundToInt() ?: 0
-                val totalSide = parts[3].toDoubleOrNull() ?: 0.0
+                // The GC2 often sends "heartbeat" or empty data frames where CY and TL are 0.0 or very close to 0
+                // We should ignore these and only update the UI when a real shot is detected.
+                Log.d(TAG, "Parsed GC2 Data -> Carry: $carryYards, Total: $totalYards, Azimuth: $azimuth, Ball Speed: $ballSpeed, Elevation: $elevation, Total Spin: $totalSpin, Side Spin: $sideSpin, Back Spin: $backSpin")
 
-                val offlineString = formatOffline(totalSide)
+                if (ballSpeed < 2.0 && carryYards < 1.0) {
+                    Log.d(TAG, "Ignoring empty/heartbeat data frame")
+                    return null
+                }
+
+                // Claude's Physics Formula for Total Distance and Offline
+                val vFps = ballSpeed * 1.46667 // Convert mph to ft/s
+                val theta = Math.toRadians(elevation)
+                val phi = Math.toRadians(azimuth)
+                val rpm = if (backSpin > 0.0) backSpin else totalSpin
+                val g = 32.2
+                val mu = 0.25 // fairway friction coefficient
+
+                // Phase 2 - Roll distance calculation
+                val vLand = vFps * kotlin.math.cos(theta)
+                val b = 1.0 - (rpm / 7000.0) // Backspin braking factor (using 7000 divisor from Claude's example)
+                val rollFeet = ((vLand * vLand) / (2.0 * g * mu)) * b
+                val rollYards = rollFeet / 3.0
+
+                // Phase 3 - Azimuth correction
+                val downrangeCarry = carryYards * kotlin.math.cos(phi)
+                val lateralOffset = carryYards * kotlin.math.sin(phi) // This is the offline amount
+
+                // Apply azimuth to roll as well (assuming the ball rolls in the same direction it was hit)
+                val downrangeRoll = rollYards * kotlin.math.cos(phi)
+                val lateralRoll = rollYards * kotlin.math.sin(phi)
+
+                val totalDownrange = downrangeCarry + downrangeRoll
+                val totalLateral = lateralOffset + lateralRoll
+                
+                // Total distance = √(Downrange² + Lateral²)
+                val calculatedTotal = kotlin.math.sqrt((totalDownrange * totalDownrange) + (totalLateral * totalLateral))
+
+                // Lateral offset is our offline distance (combining carry offline and roll offline)
+                offlineYards = totalLateral
+
+                val offlineString = formatOffline(offlineYards)
 
                 return ShotData(
                     carryDistance = carryYards,
-                    totalDistance = totalYards,
+                    totalDistance = calculatedTotal,
                     offline = offlineString
                 )
+            } else if (nmeaString.startsWith("#WECO")) {
+                // This appears to be a raw hex/binary encoded message that the GC2 sends when a shot is hit.
+                // It ends with !END.
+                // Example: #WECO00030aX00X00X00WWX0lWWX0l0000096e!END
+                Log.d(TAG, "Received WECO shot data message: $nmeaString")
+                // TODO: Need to decode the WECO message format.
+                // For now, we return null so it doesn't crash, but we need to figure out the encoding.
+                return null
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error parsing GC2 string: $nmeaString", e)
@@ -56,10 +120,9 @@ object Gc2DataParser {
      * Example: -5.0 -> "5L", 3.2 -> "3R", 0.0 -> "0"
      */
     private fun formatOffline(deviation: Double): String {
-        val rounded = deviation.roundToInt()
-        if (rounded == 0) return "0"
+        if (kotlin.math.abs(deviation) < 0.1) return "0.0"
         
         val direction = if (deviation > 0) "R" else "L"
-        return "${rounded.absoluteValue}$direction"
+        return "${String.format(java.util.Locale.US, "%.1f", kotlin.math.abs(deviation))}$direction"
     }
 }
